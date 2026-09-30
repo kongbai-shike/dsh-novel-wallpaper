@@ -51,6 +51,7 @@ window.__ModuleLoader__.load({
       scrimColor: '#000000',
       scrimAlpha: 0.35,
       speed: 38,              // px / second
+      wheelStep: 6,           // one notch / arrow press = speed × this many px
       surfaceClear: 1,        // 1 = conversation surface fully cleared
       showChapterTitle: true,
       autoResume: true,
@@ -69,6 +70,7 @@ window.__ModuleLoader__.load({
         s_opacity: '文字不透明度', s_stealth: '隐身档不透明度', s_size: '字号',
         s_color: '字体颜色', s_font: '字体', s_line: '行距', s_spacing: '字间距',
         s_scrimColor: '阅读器背景色', s_scrimAlpha: '背景浓度', s_speed: '滚动速度',
+        s_wheel: '滚轮灵敏度',
         s_surface: '界面清底程度', s_title: '显示章节标题', s_resume: '记住阅读进度',
         s_re: '分章正则', s_reset: '恢复默认', auto: '跟随主题',
         faintWarn: '文字不透明度只有 {p}%，壁纸几乎看不见',
@@ -91,6 +93,7 @@ window.__ModuleLoader__.load({
         s_opacity: 'Text opacity', s_stealth: 'Stealth opacity', s_size: 'Font size',
         s_color: 'Text color', s_font: 'Font', s_line: 'Line height', s_spacing: 'Letter spacing',
         s_scrimColor: 'Reader background', s_scrimAlpha: 'Background strength', s_speed: 'Scroll speed',
+        s_wheel: 'Wheel sensitivity',
         s_surface: 'Surface clearing', s_title: 'Show chapter title', s_resume: 'Remember progress',
         s_re: 'Chapter regex', s_reset: 'Reset defaults', auto: 'Follow theme',
         faintWarn: 'Text opacity is only {p}% — the wallpaper is effectively invisible',
@@ -403,7 +406,10 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
         // -1, not 0: a real rAF timestamp can legitimately be 0, and 0 is falsy,
         // which would make the next frame compute dt = 0 and stall the scroll.
         last: -1,
-        layer: null
+        layer: null,
+        // Kept separate from `raf`: the auto-scroll loop and a wheel glide must
+        // be cancellable independently, or one would silently kill the other.
+        wheelAnim: null
       };
 
       // Self-reporting diagnostics. A failed IndexedDB read used to be swallowed
@@ -543,6 +549,78 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
         layer.__nr.inner.style.transform = `translate3d(0, ${-Math.round(runtime.offset)}px, 0)`;
       }
 
+      /* ---- wheel / arrow reading ---- */
+
+      function cancelWheelAnim() {
+        if (runtime.wheelAnim !== null) {
+          cancelAnimationFrame(runtime.wheelAnim);
+          runtime.wheelAnim = null;
+        }
+      }
+
+      // Glide the reading offset to `to`. Progress is measured from frame DELTAS
+      // rather than an absolute clock origin: a rAF timestamp is only comparable
+      // to other rAF timestamps, and mixing in performance.now() would make the
+      // first frame's elapsed time absurd (or negative).
+      //
+      // A gesture that lands mid-glide retargets from the CURRENT painted
+      // position, so a held arrow key or a fast notch sequence accumulates into
+      // one continuous motion instead of restarting from a stale origin.
+      function animateOffsetTo(to) {
+        measure();
+        const from = runtime.offset;
+        const target = Math.max(0, Math.min(to, runtime.maxOffset));
+        if (Math.abs(target - from) < 0.5) {
+          runtime.offset = target;
+          applyTransform();
+          return;
+        }
+        cancelWheelAnim();
+        let elapsed = 0;
+        let prev = null;
+        const stepAnim = (ts) => {
+          if (prev === null) prev = ts;
+          elapsed += Math.max(0, ts - prev);
+          prev = ts;
+          const p = elapsed >= WHEEL_ANIM_MS ? 1 : elapsed / WHEEL_ANIM_MS;
+          const eased = 1 - Math.pow(1 - p, 3);   // ease-out cubic
+          runtime.offset = from + (target - from) * eased;
+          applyTransform();
+          if (p < 1) {
+            runtime.wheelAnim = requestAnimationFrame(stepAnim);
+          } else {
+            runtime.wheelAnim = null;
+            runtime.offset = target;
+            applyTransform();
+            persistProgress();
+          }
+        };
+        runtime.wheelAnim = requestAnimationFrame(stepAnim);
+      }
+
+      // One wheel notch or one arrow press. `dir` > 0 reads forward (the text
+      // slides up), `dir` < 0 reads back. Returns true when the gesture was
+      // consumed, so the caller knows whether to swallow the DOM event.
+      //
+      // Stealth is deliberately inert: the boss key exists to hand the screen
+      // back completely, so the reading controls go dead with it.
+      //
+      // A manual gesture also ends auto-play: reaching for the wheel or an arrow
+      // means "I'm driving now", and leaving the loop running would fight it.
+      function wheelScroll(dir) {
+        const s = settings.get();
+        if (s.hidden) return false;
+        if (!runtime.text) return false;
+        measure();
+        // Nothing to scroll (chapter shorter than the frame, or not measured
+        // yet): not consumed, so the host keeps the gesture.
+        if (!runtime.maxOffset) return false;
+        if (view.get().playing) pause();
+        const stepPx = Math.max(1, s.speed * s.wheelStep);
+        animateOffsetTo(runtime.offset + (dir > 0 ? stepPx : -stepPx));
+        return true;
+      }
+
       /* ---- auto-scroll engine ---- */
 
       function tick(ts) {
@@ -571,6 +649,7 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
 
       function play() {
         if (!runtime.text) return;
+        cancelWheelAnim();   // the loop and a wheel glide must never both drive offset
         measure();
         if (runtime.offset >= runtime.maxOffset) runtime.offset = 0;
         runtime.playing = true;
@@ -595,6 +674,7 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
       function gotoChapter(index, keepOffset) {
         const v = view.get();
         if (!v.chapters.length) return;
+        cancelWheelAnim();   // a glide targeting the OLD chapter must not survive
         const i = Math.max(0, Math.min(v.chapters.length - 1, index));
         if (!keepOffset) runtime.offset = 0;
         view.set((s) => ({ ...s, chapter: i }));
@@ -726,7 +806,7 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
       return {
         settings, view, runtime, persistSettings, draw, measure, applyTransform,
         play, pause, togglePlay, gotoChapter, loadBook, importFiles, removeBook,
-        toggleStealth, movePos, persistProgress, note,
+        toggleStealth, movePos, persistProgress, note, wheelScroll, cancelWheelAnim,
         refreshSurface: () => { snapshotSurfaceBase(); draw(); }
       };
     }
@@ -787,6 +867,11 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
     // past it and the rail stopped responding.
     const DRAG_THRESHOLD = 4;            // empty area: drag almost immediately
     const DRAG_THRESHOLD_CONTROL = 12;   // pressing a control: only a real drag
+
+    // One wheel notch / arrow press glides to its target over this long. Short
+    // enough to feel immediate, long enough that a fast notch sequence reads as
+    // one continuous motion instead of teleporting.
+    const WHEEL_ANIM_MS = 180;
     function exceedsDragThreshold(dx, dy, fromControl) {
       const limit = fromControl ? DRAG_THRESHOLD_CONTROL : DRAG_THRESHOLD;
       return Math.abs(dx) >= limit || Math.abs(dy) >= limit;
@@ -800,6 +885,39 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
       } catch {
         return false;
       }
+    }
+
+    // Which side owns one wheel gesture.
+    //
+    // The novel is painted BEHIND the entire GUI, so a naive global wheel
+    // handler would steal the gesture from the chat transcript, from every
+    // settings panel, and from our own contents list — all of which live above
+    // the wallpaper and expect to scroll normally.
+    //
+    // So the host keeps the gesture whenever the hovered node can still scroll
+    // that way. Only when nothing above us wants it does the wallpaper take it.
+    // That makes "scroll the chat to its end, then keep going" hand the wheel
+    // over naturally, without a mode switch.
+    function hostConsumesWheel(target, deltaY) {
+      if (!deltaY) return true;   // no direction: nothing for us to do
+      const down = deltaY > 0;
+      let el = target;
+      while (el && el.nodeType === 1) {
+        const tag = el.tagName;
+        if (tag === 'TEXTAREA' || tag === 'INPUT' || el.isContentEditable === true) return true;
+        let cs = null;
+        try { cs = getComputedStyle(el); } catch { cs = null; }
+        const overflowY = cs && cs.overflowY;
+        if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay')
+          && el.scrollHeight > el.clientHeight + 1) {
+          const room = down
+            ? el.scrollTop + el.clientHeight < el.scrollHeight - 1
+            : el.scrollTop > 1;
+          if (room) return true;
+        }
+        el = el.parentElement;
+      }
+      return false;
     }
 
     // How much of the ORIGINAL surface colour to keep: surfaceClear = 1 means
@@ -1251,6 +1369,7 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
           num('letterSpacing', 0, 0.3, 0.005, t('s_spacing'), 'em'),
           num('scrimAlpha', 0, 0.9, 0.01, t('s_scrimAlpha'), ''),
           num('speed', 4, 400, 2, t('s_speed'), 'px/s'),
+          num('wheelStep', 2, 20, 1, t('s_wheel'), '×'),
           num('surfaceClear', 0, 1, 0.02, t('s_surface'), ''),
 
           h(Row, { label: t('s_color') },
@@ -1453,6 +1572,7 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
 
       ctx.effect(() => () => {
         if (app.runtime.raf) cancelAnimationFrame(app.runtime.raf);
+        app.cancelWheelAnim();
         const layer = document.getElementById(LAYER_ID);
         if (layer) layer.remove();
         const style = document.getElementById(STYLE_ID);
@@ -1503,6 +1623,65 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
         }
       }
 
+      // Arrow keys, routed through the host shortcut service instead of a raw
+      // keydown listener. That buys three things a global listener cannot:
+      // the chord is focus-aware, conflicts are detected against every other
+      // app binding, and the user can rebind it in DSH's own shortcut settings.
+      //
+      // `regions` deliberately omits 'editable'. Ctrl+Shift+←/→ is "select by
+      // word" in any text field, and stealing it inside the composer would make
+      // editing worse — so a focused input keeps its arrows, always.
+      const readingCommands = [
+        { id: 'novel-wallpaper.scroll-up', code: 'ArrowUp', zh: '小说壁纸：向上回看', en: 'Novel wallpaper: scroll back', run: () => app.wheelScroll(-1) },
+        { id: 'novel-wallpaper.scroll-down', code: 'ArrowDown', zh: '小说壁纸：向下阅读', en: 'Novel wallpaper: scroll forward', run: () => app.wheelScroll(1) },
+        { id: 'novel-wallpaper.prev-chapter', code: 'ArrowLeft', zh: '小说壁纸：上一章', en: 'Novel wallpaper: previous chapter', run: () => app.gotoChapter(app.view.get().chapter - 1) },
+        { id: 'novel-wallpaper.next-chapter', code: 'ArrowRight', zh: '小说壁纸：下一章', en: 'Novel wallpaper: next chapter', run: () => app.gotoChapter(app.view.get().chapter + 1) }
+      ];
+      if (shortcuts && typeof shortcuts.register === 'function') {
+        readingCommands.forEach((cmd) => {
+          try {
+            ctx.effect(() => shortcuts.register({
+              id: cmd.id,
+              label: () => cmd.zh,
+              aliases: [cmd.en.toLowerCase(), cmd.zh],
+              defaults: {
+                // Only the profiles where Arrow+primary+shift passes the
+                // service's own rules. The arrow keys sit on its reserved list
+                // outside desktop Windows/macOS, and declaring a default it
+                // rejects would fail this command's whole registration.
+                'desktop:windows': { code: cmd.code, modifiers: ['primary', 'shift'] },
+                'desktop:macos': { code: cmd.code, modifiers: ['primary', 'shift'] },
+                'web:windows': { code: cmd.code, modifiers: ['primary', 'shift'] }
+              },
+              regions: ['page', 'terminal'],
+              modals: [],
+              resolve: () => ({
+                status: 'handled',
+                run: () => { cmd.run(); }
+              })
+            }), 'novel-wallpaper: shortcut ' + cmd.id);
+          } catch {
+            // Per-command best effort, exactly like the boss key: one platform
+            // rejecting a chord must not take the other three commands down.
+          }
+        });
+      }
+
+      // One wheel listener on the window, in the capture phase so we see the
+      // gesture before any host scroller does. We only swallow it when we
+      // actually moved the novel; every other case falls straight through.
+      ctx.effect(() => {
+        if (typeof window === 'undefined' || !window.addEventListener) return () => {};
+        const onWheel = (e) => {
+          if (!e.deltaY) return;
+          if (app.settings.get().hidden) return;              // boss key: reading controls go dead
+          if (hostConsumesWheel(e.target, e.deltaY)) return;  // something above us still wants it
+          if (app.wheelScroll(e.deltaY > 0 ? 1 : -1) && e.cancelable) e.preventDefault();
+        };
+        window.addEventListener('wheel', onWheel, { passive: false, capture: true });
+        return () => window.removeEventListener('wheel', onWheel, { capture: true });
+      }, 'novel-wallpaper: wheel');
+
       // Restore the last book once the host is up.
       ctx.effect(() => {
         let alive = true;
@@ -1535,6 +1714,6 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
 
     // Exposed for the headless test harness (test/logic.test.mjs). The module
     // loader ignores extra keys; nothing in the Harness reads this.
-    return { inject, apply, __internals: { decodeTxt, splitChapters, hexToRgba, DEFAULTS, createApp, exceedsDragThreshold, isInteractiveTarget, surfaceAlphaPercent } };
+    return { inject, apply, __internals: { decodeTxt, splitChapters, hexToRgba, DEFAULTS, createApp, exceedsDragThreshold, isInteractiveTarget, surfaceAlphaPercent, hostConsumesWheel } };
   }
 });

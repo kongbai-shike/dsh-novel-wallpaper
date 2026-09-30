@@ -1,0 +1,5 @@
+node_modules/
+*.log
+
+# Local scratch: pre-change snapshots of client.js taken before risky edits.
+*.bak-*
