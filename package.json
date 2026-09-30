@@ -1,9 +1,30 @@
 {
   "name": "@local/dsh-novel-wallpaper",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
   "type": "module",
-  "description": "Novel-as-wallpaper reader for the DSH Desktop GUI: renders a TXT novel as a full-frame text layer behind the chat, with a stealth draggable controller float (TOC, prev/next chapter, auto-scroll, settings).",
+  "description": "Novel-as-wallpaper reader for the DSH Web GUI: renders a TXT novel as a full-frame text layer behind the chat, with a stealth draggable controller float (TOC, prev/next chapter, auto-scroll, wheel and arrow-key navigation, settings).",
+  "license": "MIT",
+  "author": "kongbai-shike",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "novel",
+    "wallpaper",
+    "reader",
+    "txt"
+  ],
+  "homepage": "https://github.com/kongbai-shike/dsh-novel-wallpaper#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kongbai-shike/dsh-novel-wallpaper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kongbai-shike/dsh-novel-wallpaper/issues"
+  },
+  "engines": {
+    "dsh": ">=0.1.0-rc.6"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
