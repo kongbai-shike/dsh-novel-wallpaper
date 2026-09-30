@@ -206,6 +206,7 @@ the browser, with no network involved.
 
 - Targets the **DSH Web GUI** — `dsh web` in a browser, and desktop clients that embed the same
   interface.
+- Verified running against DSH Web `0.1.7-rc.2` (React 18.3.1); requires `0.1.0-rc.6` or newer.
 - Transparency is **pure CSS**: opaque tokens like `--dsw-alias-bg-base` are cleared so the layer
   below shows through. It does not rely on system acrylic/vibrancy, so it works on Windows even
   with shell material set to `off`.

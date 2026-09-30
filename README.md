@@ -190,6 +190,7 @@ Ctrl + Shift + `
 ## 兼容性
 
 - 面向 **DSH Web GUI**（浏览器里的 `dsh web`，以及内嵌同一套界面的桌面客户端）。
+- 实际运行验证于 DSH Web `0.1.7-rc.2`（React 18.3.1）；最低要求 `0.1.0-rc.6`。
 - 透明效果**纯靠 CSS**：清空 `--dsw-alias-bg-base` 这类不透明底色让下层透出来，
   不依赖系统亚克力/毛玻璃，所以 Windows 上壳层材质设为 `off` 也照样工作。
 - 和 `dsh-plugin-wallpaper-engine` **不叠加**：本插件不透出图片壁纸。两个都想用，
