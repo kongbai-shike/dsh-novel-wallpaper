@@ -23,11 +23,22 @@
     "url": "https://github.com/kongbai-shike/dsh-novel-wallpaper/issues"
   },
   "engines": {
-    "dsh": ">=0.1.0-rc.6"
+    "node": ">=18",
+    "dsh": ">=0.1.0-rc.6 <0.1.7-0 || >=0.1.7-rc.1 <0.2.0-0 || >=0.2.0-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-ui-layout": ">=0.1.0-rc.6 <0.1.7-0 || >=0.1.7-rc.1 <0.2.0-0 || >=0.2.0-rc.1",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-ui-layout": {
+      "optional": true
+    }
   },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "dsh": {
