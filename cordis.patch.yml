@@ -1,0 +1,14 @@
+# dsh-novel-wallpaper bundle patch.
+#
+# Applied over the dsh-web-app layer. The browser half is what matters: it is
+# loaded through this package's `dsh.client` manifest and renders the novel text
+# layer behind the GUI plus the stealth controller float in `shell.overlay`.
+#
+# The host row below exists so the bundle has a row to insert, and its `apply`
+# is intentionally empty: this plugin keeps no host state, appends no session
+# events, and never exposes the reader to the model. Reading stays private to
+# the browser tab.
+
+- insert:
+    - id: novel-wallpaper
+      name: '@local/dsh-novel-wallpaper'
