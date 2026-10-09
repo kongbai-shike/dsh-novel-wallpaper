@@ -23,6 +23,7 @@ interface again.
 - [Reading controls: wheel and arrow keys](#reading-controls-wheel-and-arrow-keys)
 - [Boss key](#boss-key)
 - [Settings](#settings)
+- [Chapter rules](#chapter-rules)
 - [Privacy](#privacy)
 - [Compatibility](#compatibility)
 - [Design trade-offs](#design-trade-offs)
@@ -171,19 +172,74 @@ Float → ⚙. Everything is stored in `localStorage`, on this machine only.
 | Reading | Show chapter title, remember reading position, chapter-splitting regex |
 | Presets | Readable / Balanced / Very hidden, one click |
 
-The default **chapter regex** is:
-
-```
-^[ \t\u3000]*(第[0-9一二三四五六七八九十百千零〇两]+[章节回卷篇]|Chapter\s+\d+)
-```
-
-It only matches at the start of a line, so a mention of "第一章" inside prose isn't mistaken for
-a new chapter. Chapter formats vary wildly between files — if yours doesn't match, edit that one
-line in settings.
+The default **chapter regex** is the union of every "safe" rule in the built-in table. It only
+matches at the start of a line, so a mention of "第一章" inside prose isn't mistaken for a new
+chapter. See [Chapter rules](#chapter-rules) for the table, the auto-detect fallback and the
+measured numbers.
 
 "Surface clearing" is **inverted**: `1` clears the conversation background completely (clearest
 text, most transparent interface). Lower it and the interface becomes solid again, dimming the
 novel with it.
+
+---
+
+## Chapter rules
+
+Chapter headings in the wild are a mess, so the plugin ships a rule table. The default is the
+**union of every "safe" rule** in it — import a book and it usually just works.
+
+| Rule | Matches | Examples |
+|---|---|---|
+| 第 N 章 | `第` + optional spaces + digits + optional spaces + `章节回卷篇` | `第31章 九叔的二徒弟`, `第 31 章`, `第１２章`, `第一回` |
+| Volume / part | same, unit is `卷部篇` | `第二卷 风起` |
+| Prologue / extras | the usual one-off headings | `楔子`, `序章`, `引子`, `尾声`, `终章`, `完本感言` |
+| Bracketed | wrapped in brackets | `【第12章】降伏`, `（第 13 章）风叔` |
+| Chapter N | English | `Chapter 12 Dawn` |
+
+**The spaces around the digits are the whole point.** Dumps very often write
+`第 31 章 标题`, and a tight `第N章` matches none of them — worse, it fails *silently*: a
+486-chapter book imports as a single "全文" chapter and nothing anywhere reports an error.
+That was a real bug in this plugin.
+
+**Bare-number headings** (`12、开端`, `001.`, `12、`) are their own rule but are **off by
+default**: a lone number at the start of a line is occasionally body text, so it's opt-in.
+
+### Auto-detect fallback
+
+If the configured regex finds no usable headings in your book (fewer than 2), the plugin tries
+every built-in rule, picks the best one by "most matches whose lines are mostly short", and then:
+
+- re-splits the book with it;
+- says in the status line which rule it used — it never silently ignores the regex you wrote.
+
+Candidates must have at least half of their matches on short lines (≤ 40 characters) — a whole
+paragraph can't qualify. If every rule's "headings" turn out to be body text, it refuses to guess
+and leaves the book alone: a wrong guess is worse than no split.
+
+### Changing the rule needs no re-import
+
+Editing the chapter regex in Settings **re-splits the book immediately** and writes the result
+back to the library. Below the regex field is a row of built-in rules — one click each — and you
+can still type any regex you like.
+
+Displayed titles are cleaned up first:
+
+- `第 31 章 九叔的二徒弟` → `第31章 九叔的二徒弟` (space between number and unit removed);
+- `【第12章】标题` → `第12章 标题` (brackets unwrapped);
+- when the heading is glued to its first paragraph (`第1章 标题　　正文…`), only the heading is kept.
+
+### Measured
+
+《同穿：我的名字响彻诸天》 (3.0 MB / 1.06M characters):
+
+| | Chapters | Result |
+|---|---|---|
+| Before | **1** | the entire book as one "全文" blob, 1.06M characters of unscrollable text |
+| After | **482** | preface + 481 chapters, longest title 22 characters, nothing lost |
+
+> The book is numbered up to 486, but chapters 119 / 166 / 167 / 371 / 439 **are missing from
+> the source file itself** (a common defect in pirated TXT dumps), which is not a splitting
+> error. The 481 chapters the plugin finds are every chapter that actually exists in the file.
 
 ---
 
@@ -245,7 +301,7 @@ retargets from the **currently painted position**, so consecutive input folds in
 ## Development
 
 ```sh
-node test/logic.test.mjs      # decoding / chapter splitting / colour    12 checks
+node test/logic.test.mjs      # decoding / chapter splitting / dictionary / colour   24 checks
 node test/apply.smoke.mjs     # load / layer / scrolling / wheel / shortcuts   35 checks (DOM stub)
 ```
 

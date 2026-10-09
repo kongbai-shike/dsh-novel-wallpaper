@@ -38,7 +38,44 @@ window.__ModuleLoader__.load({
     // Leading whitespace must be HORIZONTAL only: `\s` includes `\n`, which
     // would let a match start on the blank line before the heading and make the
     // chapter boundary (and its extracted title) land on the wrong line.
-    const DEFAULT_CHAPTER_RE = '^[ \\t\\u3000]*(第[0-9一二三四五六七八九十百千零〇两]+[章节回卷篇]|Chapter\\s+\\d+)';
+    const H = '[ \\t\\u3000]';
+    const CN_NUM = '[0-9０-９一二三四五六七八九十百千零〇两]+';
+    const CN_UNIT = '[章节回卷篇]';
+
+    // Every heading style common enough in Chinese TXT dumps to deserve a rule.
+    // Each `source` is line-anchored and self-contained, so a rule can be used
+    // alone (the presets in Settings) or spliced into the default union.
+    //
+    // The `H*` INSIDE the token is the point of rule #1. A very common dump style
+    // writes "第 31 章 标题" with spaces around the digits; a tight `第N章` misses
+    // every single one of them, and the failure is silent — a 480-chapter book
+    // imports as one "全文" blob and nothing anywhere reports an error.
+    const CHAPTER_RULES = [
+      { id: 'cn', source: `^${H}*第${H}*${CN_NUM}${H}*${CN_UNIT}` },
+      { id: 'cn-vol', source: `^${H}*第${H}*${CN_NUM}${H}*[卷部篇]` },
+      { id: 'cn-special', source: `^${H}*(?:楔子|序章|序言|引子|尾声|终章|后记|番外|完本感言)` },
+      { id: 'cn-bracket', source: `^${H}*[【〔〖「『（(\\[]${H}*第${H}*${CN_NUM}${H}*${CN_UNIT}` },
+      // Bare-number headings ("12", "012.", "12、标题"). Deliberately NOT part of
+      // the default union: a lone number at the start of a line is occasionally
+      // body text, so this rule is only ever picked by the auto-detector or by
+      // hand from the presets.
+      { id: 'cn-num', risky: true, source: `^${H}*[0-9０-９]{1,4}${H}*(?:[.、,，:：)）]${H}*\\S.*)?$` },
+      { id: 'en', source: `^${H}*Chapter${H}+[0-9IVXLCivxlc]+` }
+    ];
+
+    // The default is the union of the safe rules: importing works out of the box,
+    // while Settings still shows exactly one editable pattern.
+    const DEFAULT_CHAPTER_RE = '^(?:' + CHAPTER_RULES
+      .filter((r) => !r.risky)
+      .map((r) => r.source.replace(/^\^/, ''))
+      .join('|') + ')';
+
+    const RULE_PRESETS = [{ id: 'default', source: DEFAULT_CHAPTER_RE }].concat(CHAPTER_RULES);
+
+    // "第 31 章" and "第31章" are the same heading; print the tight form.
+    const TIGHTEN_HEAD_RE = new RegExp(`^第${H}*(${CN_NUM})${H}*(${CN_UNIT})`);
+    // 【第12章】标题 / （第12章） — unwrapped by cleanTitle.
+    const BRACKET_HEAD_RE = /^([【〔〖「『（(\[])([^】〕〗」』）)\]\n]{1,24})([】〕〗」』）)\]])([^\n]*)$/;
 
     const DEFAULTS = {
       opacity: 0.18,          // wallpaper text opacity
@@ -73,6 +110,13 @@ window.__ModuleLoader__.load({
         s_wheel: '滚轮灵敏度',
         s_surface: '界面清底程度', s_title: '显示章节标题', s_resume: '记住阅读进度',
         s_re: '分章正则', s_reset: '恢复默认', auto: '跟随主题',
+        s_rule: '分章规则', s_splitInfo: '当前分章：{n} 章（规则：{rule}）',
+        s_reHint: '改完正则会自动重新分章，不用重新导入',
+        splitDone: '已重新分章：共 {n} 章',
+        autoSplit: '原正则没匹配到章节，已自动按「{rule}」分章：共 {n} 章',
+        rule_default: '默认（全部常见格式）', rule_cn: '第 N 章', 'rule_cn-vol': '卷 / 部 / 篇',
+        'rule_cn-special': '楔子 / 番外', 'rule_cn-bracket': '【第 N 章】',
+        'rule_cn-num': '纯数字标题', rule_en: 'Chapter N', rule_custom: '自定义正则',
         faintWarn: '文字不透明度只有 {p}%，壁纸几乎看不见',
         faintFix: '一键恢复可见',
         presetReadable: '看得清', presetBalanced: '平衡', presetStealth: '极隐蔽',
@@ -96,6 +140,13 @@ window.__ModuleLoader__.load({
         s_wheel: 'Wheel sensitivity',
         s_surface: 'Surface clearing', s_title: 'Show chapter title', s_resume: 'Remember progress',
         s_re: 'Chapter regex', s_reset: 'Reset defaults', auto: 'Follow theme',
+        s_rule: 'Chapter rule', s_splitInfo: 'Split into {n} chapters (rule: {rule})',
+        s_reHint: 'Editing the regex re-splits the book automatically',
+        splitDone: 'Re-split: {n} chapters',
+        autoSplit: 'The regex matched no headings — auto-split as "{rule}": {n} chapters',
+        rule_default: 'Default (all common)', rule_cn: '第 N 章', 'rule_cn-vol': 'Volume / part',
+        'rule_cn-special': 'Prologue / extras', 'rule_cn-bracket': 'Bracketed',
+        'rule_cn-num': 'Bare number', rule_en: 'Chapter N', rule_custom: 'Custom regex',
         faintWarn: 'Text opacity is only {p}% — the wallpaper is effectively invisible',
         faintFix: 'Make it visible',
         presetReadable: 'Readable', presetBalanced: 'Balanced', presetStealth: 'Barely there',
@@ -235,7 +286,27 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function splitChapters(text, patternSource) {
+    // A heading is followed by body text in every dump style, and some of them
+    // glue the first paragraph onto the heading line with two ideographic spaces
+    // ("第 3 章 标题　　正文…"). Cut there, but only when what follows is long
+    // enough to be prose, so a title that merely contains a double space lives.
+    function cleanTitle(line) {
+      let s = String(line || '').replace(/^[ \t\u3000]+/, '');
+      const bm = BRACKET_HEAD_RE.exec(s);
+      if (bm) {
+        const rest = bm[4].replace(/^[ \t\u3000]+/, '');
+        s = rest ? `${bm[2]} ${rest}` : bm[2];
+      }
+      const gap = /[ \t\u3000]{2,}/.exec(s);
+      if (gap && s.length - (gap.index + gap[0].length) >= 30) s = s.slice(0, gap.index);
+      return s.replace(TIGHTEN_HEAD_RE, '第$1$2').replace(/\s+/g, ' ').trim().slice(0, 80);
+    }
+
+    // Scan for heading lines. The pattern only anchors the heading token, so the
+    // WHOLE line becomes the title: "第一章 开端" is a useful TOC entry, "第一章"
+    // alone is not. Resolve the line around the match rather than from m.index,
+    // so a leading newline can never produce an empty title.
+    function marksFrom(text, patternSource) {
       let re;
       try {
         re = new RegExp(patternSource || DEFAULT_CHAPTER_RE, 'gm');
@@ -246,18 +317,17 @@ window.__ModuleLoader__.load({
       let m;
       let guard = 0;
       while ((m = re.exec(text)) !== null) {
-        // The pattern only anchors the chapter token, so take the WHOLE line as
-        // the title: "第一章 开端" is a useful TOC entry, "第一章" alone is not.
-        // Resolve the line around the match rather than from m.index, so a
-        // leading newline can never produce an empty title.
         const lineStart = text.lastIndexOf('\n', m.index - 1) + 1;
         let lineEnd = text.indexOf('\n', m.index);
         if (lineEnd === -1) lineEnd = text.length;
-        const line = text.slice(lineStart, lineEnd);
-        marks.push({ index: lineStart, title: line.replace(/\s+/g, ' ').trim().slice(0, 80) });
+        marks.push({ index: lineStart, title: cleanTitle(text.slice(lineStart, lineEnd)) });
         if (m.index === re.lastIndex) re.lastIndex += 1;
         if (++guard > 200000) break;
       }
+      return marks;
+    }
+
+    function chaptersFromMarks(text, marks) {
       if (marks.length === 0) {
         return [{ title: t('full'), start: 0, end: text.length }];
       }
@@ -273,6 +343,56 @@ window.__ModuleLoader__.load({
       return chapters;
     }
 
+    function splitChapters(text, patternSource) {
+      return chaptersFromMarks(text, marksFrom(text, patternSource));
+    }
+
+    // Scoring one pattern as a chapter rule. Matching is not the same as being
+    // right: a rule loose enough to hit body text yields plenty of "chapters"
+    // whose "title" is a whole paragraph. Real headings are short lines, so a
+    // large majority of short matches is required before trusting the count.
+    function scorePattern(text, rule) {
+      const marks = marksFrom(text, rule.source);
+      if (marks.length < 2) return null;
+      const short = marks.filter((mk) => mk.title.length <= 40).length;
+      return { id: rule.id, source: rule.source, count: marks.length, shortRatio: short / marks.length };
+    }
+
+    // Used when the configured pattern does not actually split the book: try every
+    // built-in rule and keep the one that explains the most short heading lines.
+    // This is what turns "one 1.06M-character 全文 chapter" back into a table of
+    // contents instead of silently shipping a single unreadable blob.
+    function detectChapterRe(text) {
+      const pool = [{ id: 'default', source: DEFAULT_CHAPTER_RE }].concat(CHAPTER_RULES);
+      const scored = [];
+      for (const rule of pool) {
+        const s = scorePattern(text, rule);
+        if (s) scored.push(s);
+      }
+      if (!scored.length) return null;
+      // A rule that only ever matches paragraph-length lines is describing body
+      // text, not headings. Refusing is better than inventing a table of contents.
+      const usable = scored.filter((s) => s.shortRatio >= 0.5);
+      if (!usable.length) return null;
+      return usable.sort((a, b) => b.count - a.count || b.shortRatio - a.shortRatio)[0];
+    }
+
+    // Split, and when the configured pattern found nothing usable fall back to
+    // auto-detection. The chosen rule is reported back so the UI can say which one
+    // was used rather than silently overriding the user's own setting.
+    function splitChaptersAuto(text, patternSource) {
+      const marks = marksFrom(text, patternSource);
+      if (marks.length >= 2) {
+        return { chapters: chaptersFromMarks(text, marks), ruleId: null, count: marks.length };
+      }
+      const hit = detectChapterRe(text);
+      if (hit && hit.count > marks.length) {
+        const better = marksFrom(text, hit.source);
+        return { chapters: chaptersFromMarks(text, better), ruleId: hit.id, count: better.length };
+      }
+      return { chapters: chaptersFromMarks(text, marks), ruleId: null, count: marks.length };
+    }
+
     function makeId() {
       return 'nw-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
     }
@@ -282,7 +402,7 @@ window.__ModuleLoader__.load({
       const buffer = await file.arrayBuffer();
       const { text, encoding } = decodeTxt(buffer);
       const normalized = text.replace(/\r\n?/g, '\n');
-      const chapters = splitChapters(normalized, settings.chapterRe);
+      const auto = splitChaptersAuto(normalized, settings.chapterRe);
       const rec = {
         id: makeId(),
         title: (file.name || 'novel.txt').replace(/\.txt$/i, ''),
@@ -290,7 +410,8 @@ window.__ModuleLoader__.load({
         size: file.size,
         addedAt: Date.now(),
         text: normalized,
-        chapters
+        chapters: auto.chapters,
+        split: { ruleId: auto.ruleId, count: auto.chapters.length }
       };
       await idbPut(rec);
       return rec;
@@ -388,6 +509,9 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
         title: '',
         chapter: 0,
         chapters: [],
+        // How the current book was split: { ruleId, count }. ruleId is non-null
+        // only when the configured pattern failed and a built-in rule was used.
+        split: null,
         playing: false,
         panel: null,        // null | 'toc' | 'settings' | 'library'
         books: readJson(LS_LIBRARY, []),
@@ -442,11 +566,44 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
         }
       }
 
+      // Changing the chapter regex must take effect immediately. Chapters are
+      // baked into the stored record at import time, so without this the setting
+      // looked broken: you could fix the pattern and see no change until you
+      // deleted the book and imported it again.
+      async function resplitCurrentBook() {
+        const v = view.get();
+        if (!v.bookId || !runtime.text) return;
+        try {
+          const auto = splitChaptersAuto(runtime.text, settings.get().chapterRe);
+          const chapter = Math.max(0, Math.min(auto.chapters.length - 1, v.chapter));
+          const split = { ruleId: auto.ruleId, count: auto.chapters.length };
+          runtime.offset = 0;
+          const books = view.get().books.map((b) => (
+            b.id === v.bookId ? { ...b, chapterCount: auto.chapters.length, split } : b
+          ));
+          view.set((s) => ({
+            ...s,
+            chapters: auto.chapters,
+            chapter,
+            split,
+            books,
+            status: t('splitDone').replace('{n}', String(auto.chapters.length))
+          }));
+          writeJson(LS_LIBRARY, books);
+          const rec = await idbGet(v.bookId);
+          if (rec) await idbPut({ ...rec, chapters: auto.chapters, split });
+        } catch (err) {
+          view.set((s) => ({ ...s, status: '重新分章失败: ' + String((err && err.message) || err) }));
+        }
+      }
+
       const persistSettings = (patch) => {
+        const before = settings.get().chapterRe;
         settings.set((s) => ({ ...s, ...patch }));
         // `hidden` is deliberately session-scoped and not written to disk.
         const { hidden, ...rest } = settings.get();
         writeJson(LS_SETTINGS, rest);
+        if (patch && patch.chapterRe !== undefined && patch.chapterRe !== before) resplitCurrentBook();
         draw();
       };
 
@@ -722,6 +879,7 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
           title: rec.title,
           chapters,
           chapter: Math.max(0, Math.min(chapters.length - 1, chapter)),
+          split: rec.split || null,
           status: ''
         }));
         note('load-ok', {
@@ -749,7 +907,7 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
             const rec = await importFile(file, settings.get(), (s) => view.set((v) => ({ ...v, status: s })));
             const light = {
               id: rec.id, title: rec.title, size: rec.size, encoding: rec.encoding,
-              chapterCount: rec.chapters.length, addedAt: rec.addedAt
+              chapterCount: rec.chapters.length, addedAt: rec.addedAt, split: rec.split
             };
             view.set((v) => {
               const books = [light, ...v.books.filter((b) => b.id !== light.id)];
@@ -757,6 +915,17 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
               return { ...v, books, status: '' };
             });
             await loadBook(rec.id, false);
+            // loadBook clears `status`, so the auto-detection notice has to be
+            // written after it — otherwise the one message that explains why the
+            // user's own regex was ignored is the one message never shown.
+            if (rec.split && rec.split.ruleId) {
+              view.set((v) => ({
+                ...v,
+                status: t('autoSplit')
+                  .replace('{rule}', t('rule_' + rec.split.ruleId))
+                  .replace('{n}', String(rec.chapters.length))
+              }));
+            }
           } catch (err) {
             view.set((v) => ({ ...v, status: '导入失败: ' + (err && err.message ? err.message : err) }));
           }
@@ -1441,7 +1610,37 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
                 color: token('--dsw-alias-label-primary'), outline: 'none'
               }
             }),
+            // One click per heading style. Without these the regex field is a
+            // blank wall unless you already know how Chinese chapter headings
+            // differ from dump to dump.
+            h('div', { style: { marginTop: 7, marginBottom: 4, fontSize: 11, color: token('--dsw-alias-label-caption') } },
+              t('s_rule')),
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
+              RULE_PRESETS.map((r) => h('button', {
+                key: r.id,
+                type: 'button',
+                title: r.source,
+                onClick: () => set({ chapterRe: r.source }),
+                style: {
+                  padding: '3px 7px', cursor: 'pointer', fontSize: 11,
+                  borderRadius: token('--dsw-radius-sm'),
+                  border: `1px solid ${token('--dsw-alias-border-l3')}`,
+                  background: s.chapterRe === r.source
+                    ? token('--dsw-alias-interactive-bg-hover')
+                    : 'transparent',
+                  color: s.chapterRe === r.source
+                    ? token('--dsw-static-deepseek-450')
+                    : token('--dsw-alias-label-secondary')
+                }
+              }, t('rule_' + r.id)))
+            ),
             h('div', { style: { marginTop: 6, fontSize: 11, color: token('--dsw-alias-label-caption') } },
+              view.split && view.split.count
+                ? t('s_splitInfo')
+                  .replace('{n}', String(view.split.count))
+                  .replace('{rule}', view.split.ruleId ? t('rule_' + view.split.ruleId) : t('rule_custom'))
+                : t('s_reHint')),
+            h('div', { style: { marginTop: 4, fontSize: 11, color: token('--dsw-alias-label-caption') } },
               t('bossHint'))
           ),
 
@@ -1714,6 +1913,6 @@ body[${ACTIVE_ATTR}="on"] .dshDesktopConversationSurface { background: transpare
 
     // Exposed for the headless test harness (test/logic.test.mjs). The module
     // loader ignores extra keys; nothing in the Harness reads this.
-    return { inject, apply, __internals: { decodeTxt, splitChapters, hexToRgba, DEFAULTS, createApp, exceedsDragThreshold, isInteractiveTarget, surfaceAlphaPercent, hostConsumesWheel } };
+    return { inject, apply, __internals: { decodeTxt, splitChapters, splitChaptersAuto, marksFrom, cleanTitle, detectChapterRe, CHAPTER_RULES, DEFAULT_CHAPTER_RE, DICT, hexToRgba, DEFAULTS, createApp, SettingsPanel, exceedsDragThreshold, isInteractiveTarget, surfaceAlphaPercent, hostConsumesWheel } };
   }
 });

@@ -135,7 +135,7 @@ const mod = captured.factory((name) => {
   if (name === 'react') return ReactStub;
   throw new Error('unexpected require: ' + name);
 });
-const { createApp, DEFAULTS, surfaceAlphaPercent } = mod.__internals;
+const { createApp, DEFAULTS, surfaceAlphaPercent, SettingsPanel, DICT } = mod.__internals;
 
 let pass = 0;
 const check = (name, fn) => {
@@ -151,6 +151,17 @@ const check = (name, fn) => {
 
 /* ──────────────────────────── apply() ──────────────────────────── */
 
+// The React stub returns { type, props, kids } and never actually renders, so a
+// small walker is needed to read back the text a component tree would produce.
+// Only CHILD text is collected — props are attributes, not children.
+function collectText(node) {
+  if (node === null || node === undefined || node === false) return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node) + ' ';
+  if (Array.isArray(node)) return node.map(collectText).join('');
+  if (node.kids) return collectText(node.kids);
+  return '';
+}
+
 const effects = [];
 let slotReg = null;
 let lastReg = null;
@@ -162,7 +173,7 @@ const shortcutById = (id) => shortcutRegs.find((c) => c.id === id);
 
 const ctx = {
   get: (name) => {
-    if (name === 'locale') return { register: () => () => {}, bind: () => (k) => k };
+    if (name === 'locale') return { register: () => () => {}, bind: () => (k) => (DICT.zh[k] !== undefined ? DICT.zh[k] : k) };
     if (name === 'shortcuts') return { register: (c) => { shortcutRegs.push(c); return () => {}; } };
     return undefined;
   },
@@ -587,6 +598,33 @@ check('an exhausted inner scroller hands over to an outer one that has room', ()
 
 check('a directionless wheel event is never ours', () => {
   assert.equal(hostConsumesWheel(scrollerOf({ scrollTop: 0 }), 0), true);
+});
+
+/* ─────────────────────── settings panel render ─────────────────────── */
+
+console.log('settings panel');
+
+// The picker is the only way a user can fix a book whose headings the default
+// rules miss, so it has to actually render — a hook or a key typo in it would
+// otherwise only show up as a blank Settings panel in the real app.
+check('renders every chapter-rule preset and the current split readout', () => {
+  const a = createApp();
+  a.view.set((v) => ({ ...v, panel: 'settings', split: { ruleId: 'cn', count: 482 } }));
+  const tree = SettingsPanel({ app: a });
+  assert.ok(tree, 'the panel must render when view.panel === "settings"');
+  const text = collectText(tree);
+  for (const label of ['默认（全部常见格式）', '第 N 章', '卷 / 部 / 篇', '楔子 / 番外', '【第 N 章】', '纯数字标题', 'Chapter N']) {
+    assert.ok(text.includes(label), 'missing preset label: ' + label + ' — got: ' + text);
+  }
+  assert.ok(text.includes('当前分章：482 章'), 'the readout must show the count — got: ' + text);
+  assert.ok(text.includes('第 N 章'), 'the readout must name the rule that was used');
+});
+
+check('the panel renders with no book loaded too', () => {
+  const a = createApp();
+  a.view.set((v) => ({ ...v, panel: 'settings', split: null }));
+  const tree = SettingsPanel({ app: a });
+  assert.ok(collectText(tree).includes('改完正则会自动重新分章'), 'the hint replaces the readout');
 });
 
 /* ──────────────────────────── teardown ──────────────────────────── */

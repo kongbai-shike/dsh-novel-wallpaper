@@ -30,7 +30,7 @@ assert.equal(captured.id, '@local/dsh-novel-wallpaper');
 const mod = captured.factory((name) => {
   if (name === 'react') return ReactStub;
   throw new Error('unexpected require: ' + name);
-});const { decodeTxt, splitChapters, hexToRgba, DEFAULTS } = mod.__internals;
+});const { decodeTxt, splitChapters, splitChaptersAuto, cleanTitle, detectChapterRe, CHAPTER_RULES, DICT, hexToRgba, DEFAULTS } = mod.__internals;
 
 let pass = 0;
 const check = (name, fn) => {
@@ -64,6 +64,40 @@ check('exports "./package.json" so the client-module scanner can find the manife
   assert.ok(pkg.dsh && pkg.dsh.client, 'dsh.client must be declared');
   assert.equal(pkg.dsh.client.platform, 'web');
   assert.ok(pkg.exports['./client'], 'dsh.client requires an exported "./client" bundle');
+});
+
+// A missing dictionary key is invisible at runtime: t() falls back to returning
+// the key itself, so the panel silently renders "rule_cn-vol" as a button label.
+check('every t() key in client.js exists in both locales', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '..', 'client.js'), 'utf8');
+  const keys = new Set();
+  for (const m of src.matchAll(/(?:^|[^\w$.])t\('([^']+)'\)/g)) keys.add(m[1]);
+  if (/t\('rule_' \+/.test(src)) {
+    keys.add('rule_custom');
+    keys.add('rule_default');
+    for (const r of CHAPTER_RULES) keys.add('rule_' + r.id);
+  }
+  const missing = [];
+  for (const k of keys) {
+    if (DICT.zh[k] === undefined) missing.push('zh:' + k);
+    if (DICT.en[k] === undefined) missing.push('en:' + k);
+  }
+  assert.deepEqual(missing, [], 'missing dictionary entries: ' + missing.join(', '));
+  assert.ok(keys.size > 40, 'sanity: the scan should find the whole dictionary surface');
+});
+
+// The preset buttons are driven by the rule table, so the two must not drift.
+check('every chapter rule has an id, a pattern and a label', () => {
+  assert.ok(CHAPTER_RULES.length >= 5);
+  const ids = new Set();
+  for (const r of CHAPTER_RULES) {
+    assert.ok(r.id && !ids.has(r.id), 'rule ids must be unique: ' + r.id);
+    ids.add(r.id);
+    assert.ok(DICT.zh['rule_' + r.id], 'missing zh label for rule ' + r.id);
+    assert.ok(DICT.en['rule_' + r.id], 'missing en label for rule ' + r.id);
+    assert.doesNotThrow(() => new RegExp(r.source), 'rule ' + r.id + ' must compile');
+  }
 });
 
 console.log('decodeTxt');
@@ -157,6 +191,88 @@ check('falls back to a single chapter when nothing matches', () => {
 check('bad regex does not throw', () => {
   const ch = splitChapters('第一章 甲\nA\n第二章 乙\nB', '([unclosed');
   assert.ok(Array.isArray(ch) && ch.length >= 1);
+});
+
+console.log('splitChapters — heading styles seen in real TXT dumps');
+
+// The regression that motivated the rule table: a 486-chapter dump writes
+// "第 31 章 标题" with spaces around the digits. The old tight `第N章` pattern
+// matched ZERO of them, so the whole 1.06M-character book imported as a single
+// "全文" chapter with no error reported anywhere.
+check('splits "第 N 章" — spaces around the digits', () => {
+  const text = '第 1 章 九叔的二徒弟\n　　正文一\n第 2 章 外挂来了？\n正文二\n第 486 章 死神世界后记\n正文三';
+  const ch = splitChapters(text, DEFAULTS.chapterRe);
+  assert.equal(ch.length, 3, 'expected 3 chapters, got ' + ch.length);
+  assert.equal(ch[0].title, '第1章 九叔的二徒弟');
+  assert.equal(ch[1].title, '第2章 外挂来了？');
+  assert.equal(ch[2].title, '第486章 死神世界后记');
+});
+
+check('handles full-width digits, 节 and 卷', () => {
+  const text = '第１２章 全角\nA\n第 3 节 转折\nB\n第 2 卷 风起\nC\n楔子\nD';
+  const ch = splitChapters(text, DEFAULTS.chapterRe);
+  assert.equal(ch.length, 4, 'expected 4 chapters, got ' + ch.length);
+  assert.equal(ch[0].title, '第１２章 全角');
+  assert.equal(ch[1].title, '第3节 转折');
+  assert.equal(ch[2].title, '第2卷 风起');
+  assert.equal(ch[3].title, '楔子');
+});
+
+check('detects a bracketed heading and unwraps it', () => {
+  const ch = splitChapters('【第12章】降伏\nA\n（第 13 章）风叔\nB', DEFAULTS.chapterRe);
+  assert.equal(ch.length, 2);
+  assert.equal(ch[0].title, '第12章 降伏');
+  assert.equal(ch[1].title, '第13章 风叔');
+  assert.equal(cleanTitle('（第 7 章）'), '第7章');
+});
+
+check('cuts a heading glued to its first paragraph', () => {
+  const body = '　　正文从这里开始，这一段必须足够长，长到不可能是一个章节标题，否则这个启发式就不该触发。';
+  const text = `第 1 章 标题${body}\n下一行`;
+  const ch = splitChapters(text, DEFAULTS.chapterRe);
+  assert.equal(ch.length, 1);
+  assert.equal(ch[0].title, '第1章 标题');
+});
+
+check('keeps a double space that belongs to the title, not to a body break', () => {
+  assert.equal(cleanTitle('第 9 章 上　　下'), '第9章 上 下');
+});
+
+console.log('splitChaptersAuto / detectChapterRe');
+
+check('auto-detects a built-in rule when the configured pattern matches nothing', () => {
+  const text = '12、开端\nA\n13、发展\nB\n14、结局\nC';
+  const r = splitChaptersAuto(text, DEFAULTS.chapterRe);
+  assert.equal(r.ruleId, 'cn-num');
+  assert.equal(r.count, 3);
+  assert.equal(r.chapters[0].title, '12、开端');
+});
+
+check('does not auto-detect when the configured pattern already splits', () => {
+  const r = splitChaptersAuto('第一章 甲\nA\n第二章 乙\nB', DEFAULTS.chapterRe);
+  assert.equal(r.ruleId, null);
+  assert.equal(r.chapters.length, 2);
+});
+
+check('refuses to guess when every candidate only matches paragraph-length lines', () => {
+  const long = '啊'.repeat(60);
+  assert.equal(detectChapterRe(`番外${long}\n后记${long}\n终章${long}`), null);
+});
+
+check('detectChapterRe reports the rule it would use, not the raw count', () => {
+  const text = '第 1 章 甲\nA\n第 2 章 乙\nB\n第 3 章 丙\nC';
+  const hit = detectChapterRe(text);
+  assert.ok(hit, 'expected a detection');
+  assert.equal(hit.count, 3);
+  assert.ok(hit.shortRatio >= 0.8);
+});
+
+check('a customized pattern that matches is left alone by splitChaptersAuto', () => {
+  const text = '◆ 1 ◆\nA\n◆ 2 ◆\nB';
+  const r = splitChaptersAuto(text, '^[ \\t\\u3000]*◆[ \\t\\u3000]*\\d+');
+  assert.equal(r.ruleId, null);
+  assert.equal(r.chapters.length, 2);
+  assert.equal(r.chapters[0].title, '◆ 1 ◆');
 });
 
 console.log('hexToRgba');
